@@ -68,10 +68,37 @@ si contiene datos que necesita conservar.
   casos y monitoreos también admiten `PUT /{recurso}/{id}`.
   Los recursos de flotas y asignaciones conservan los
   campos esperados por Vue: `{id,name}` y `{id,fleetId,vehicleId,responsible}`.
+- Historial de revisiones: `GET /monitorings/{id}/checks` (ver la sección siguiente).
+
+### Historial de revisiones de monitoreo
+
+Vehicle Monitoring guarda en `monitoring_checks` cada revisión aceptada de un
+monitoreo. Una revisión es un `PUT /monitorings/{id}` de un monitoreo activo con un
+`lastCheckedAt` posterior al de la última revisión aceptada. Vue conserva su flujo:
+primero `POST /alerts` si hay cambios y después ese `PUT`.
+
+- `GET /api/v1/monitorings/{id}/checks` devuelve hasta 50 revisiones, de la más
+  reciente a la más antigua, solo con `id`, `checkedAt` (UTC) y `result`.
+  Responde 200 con `[]` si el monitoreo es propio y aún no tiene revisiones, 404 si
+  no existe o es de otra cuenta y 401 sin sesión. No requiere un plan activo.
+- `result` es `no_changes` o `change_detected`. El servidor compara la instantánea
+  previa con la captura actual del vehículo, por claves y valores. `source_unavailable`
+  queda reservado para cuando exista una fuente que entregue ese estado.
+- Crear, pausar, reanudar o cambiar el intervalo sin un instante nuevo no agrega filas.
+  Los monitoreos anteriores a esta versión empiezan con historial vacío.
+- Reintentos: el mismo instante, aunque llegue con otro formato, o un instante ya
+  registrado devuelven 200 con el estado guardado, sin crear otra fila ni alterar la
+  instantánea. Un instante anterior a la última revisión aceptada devuelve 409
+  (`Check is older than the latest accepted check`) y no reemplaza el estado.
+- La fila de historial y la nueva instantánea se guardan en la misma transacción.
+  Cada actualización bloquea la fila del monitoreo hasta confirmar, por lo que dos
+  solicitudes simultáneas se procesan una tras otra. Una colisión del índice único
+  `(monitoring_id, checked_at)` responde 409 `Check already recorded`, distinto del
+  409 `Vehicle already monitored`.
 
 Ejecute `node scripts/smoke.mjs` contra una base local desechable. La prueba crea
 dos cuentas y verifica activación de plan, aislamiento, asignaciones,
-reportes, resolución, alertas y revocación de sesión. Los datos de prueba que
+reportes, resolución, alertas, historial de revisiones y revocación de sesión. Los datos de prueba que
 no se eliminan como parte del flujo permanecen en la base.
 
 Para probar Vue localmente, inicie Vite con `VITE_AUTH_MODE=real` y

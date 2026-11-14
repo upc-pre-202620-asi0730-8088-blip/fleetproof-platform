@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 
 const base = process.env.FLEETPROOF_TEST_API ?? 'http://127.0.0.1:5080/api/v1';
 assert.ok(['127.0.0.1', 'localhost'].includes(new URL(base).hostname), 'Use a disposable local database');
@@ -92,16 +92,77 @@ const watchBody = { vehicleId: created.id, status: 'active', intervalMinutes: 60
 await request('/monitorings', { method: 'POST', token: b.token, body: watchBody, status: 404 });
 const watch = await request('/monitorings', { method: 'POST', token: a.token, body: watchBody, status: 201 });
 await request('/monitorings', { method: 'POST', token: a.token, body: watchBody, status: 409 });
+const historyPath = `/monitorings/${watch.id}/checks`;
+const readHistory = () => request(historyPath, { token: a.token });
+const instantOf = check => Date.parse(check.checkedAt);
+assert.deepEqual(await readHistory(), []);
 const alertBody = { monitoringId: watch.id, vehicleId: created.id, changes: [] };
 await request('/alerts', { method: 'POST', token: a.token, body: alertBody, status: 409 });
+const check = at => request(`/monitorings/${watch.id}`, { method: 'PUT', token: a.token,
+  body: { ...watch, lastCheckedAt: at instanceof Date ? at.toISOString() : at } });
+const firstCheckAt = new Date(Date.now() - 60_000);
+await check(firstCheckAt);
+let history = await readHistory();
+assert.equal(history.length, 1);
+assert.equal(history[0].result, 'no_changes');
+assert.deepEqual(Object.keys(history[0]).sort(), ['checkedAt', 'id', 'result']);
+assert.equal(instantOf(history[0]), firstCheckAt.getTime());
 await request(`/vehicles/${created.id}`, { method: 'PUT', token: a.token, body: { ...vehicle, risk: 'high' } });
 const alert = await request('/alerts', { method: 'POST', token: a.token, body: alertBody, status: 201 });
 assert.ok(alert.changes.some(change => change.field === 'risk' && change.after === 'high'));
 assert.deepEqual(await request('/alerts', { token: b.token }), []);
-const updatedWatch = await request(`/monitorings/${watch.id}`, { method: 'PUT', token: a.token,
-  body: { ...watch, lastCheckedAt: new Date().toISOString() } });
+const secondCheckAt = new Date();
+const updatedWatch = await check(secondCheckAt);
 assert.equal(updatedWatch.snapshot.risk, 'high');
-await request(`/monitorings/${watch.id}`, { method: 'PUT', token: a.token, body: { ...updatedWatch, status: 'inactive' } });
+history = await readHistory();
+assert.deepEqual(history.map(item => item.result), ['change_detected', 'no_changes']);
+assert.equal(instantOf(history[0]), secondCheckAt.getTime());
+assert.deepEqual((await request('/alerts', { token: a.token })).map(item => item.id), [alert.id]);
+
+// Retries and late checks do not add rows or replace the latest state.
+const sameInstantOtherFormat = secondCheckAt.toISOString().replace('Z', '+00:00');
+for (const repeated of [secondCheckAt, sameInstantOtherFormat, firstCheckAt]) {
+  const response = await check(repeated);
+  assert.equal(response.lastCheckedAt, updatedWatch.lastCheckedAt);
+  assert.equal((await readHistory()).length, 2);
+}
+await request(`/monitorings/${watch.id}`, { method: 'PUT', token: a.token, status: 409,
+  body: { ...watch, lastCheckedAt: new Date(firstCheckAt.getTime() - 1000).toISOString() } });
+assert.equal((await readHistory()).length, 2);
+assert.equal((await request('/monitorings', { token: a.token }))[0].lastCheckedAt, updatedWatch.lastCheckedAt);
+
+// Pausing, resuming or reporting an instant while paused is not a check.
+const paused = await request(`/monitorings/${watch.id}`, { method: 'PUT', token: a.token,
+  body: { ...updatedWatch, status: 'inactive', lastCheckedAt: new Date(secondCheckAt.getTime() + 1000).toISOString() } });
+assert.equal(paused.lastCheckedAt, updatedWatch.lastCheckedAt);
+await request(`/monitorings/${watch.id}`, { method: 'PUT', token: a.token,
+  body: { ...updatedWatch, status: 'active', intervalMinutes: 30 } });
+assert.equal((await readHistory()).length, 2);
+
+// Two requests with the same new instant at the same time add one row.
+const raceAt = new Date(secondCheckAt.getTime() + 5000);
+await Promise.all([check(raceAt), check(raceAt)]);
+history = await readHistory();
+assert.equal(history.length, 3);
+assert.equal(history[0].result, 'no_changes');
+
+// The list is limited to 50 rows, newest first.
+for (let step = 1; step <= 55; step++) await check(new Date(raceAt.getTime() + step * 1000));
+history = await readHistory();
+assert.equal(history.length, 50);
+assert.equal(instantOf(history[0]), raceAt.getTime() + 55_000);
+assert.ok(history.every((item, index) => index === 0 || instantOf(history[index - 1]) > instantOf(item)));
+
+// Other accounts, missing sessions and unknown ids do not reach the history.
+await request(historyPath, { token: b.token, status: 404 });
+await request(historyPath, { status: 401 });
+await request(`/monitorings/${randomUUID()}/checks`, { token: a.token, status: 404 });
+const openApi = await (await fetch(new URL('/openapi/v1.json', base), { signal: AbortSignal.timeout(5000) })).json();
+assert.ok(openApi.paths['/api/v1/monitorings/{id}/checks']?.get);
+// Reading the history does not need an active plan.
+await request(`/subscriptions/${plan.id}`, { method: 'PUT', token: a.token, body: { ...active, status: 'cancelled' } });
+assert.equal((await readHistory()).length, 50);
+await request(`/monitorings/${watch.id}`, { method: 'PUT', token: a.token, body: { ...updatedWatch, status: 'inactive' }, status: 200 });
 
 const newPassword = randomBytes(18).toString('hex');
 await request('/account', { method: 'PATCH', token: a.token, body: { username: first.username, currentPassword: 'wrong-password' }, status: 403 });

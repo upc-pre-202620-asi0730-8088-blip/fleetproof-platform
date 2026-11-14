@@ -288,6 +288,42 @@ namespace FleetProof.Api.Migrations
                     b.ToTable("monitoring_alerts", (string)null);
                 });
 
+            modelBuilder.Entity("FleetProof.VehicleMonitoring.MonitoringCheck", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<DateTime>("CheckedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("checked_at");
+
+                    b.Property<Guid>("MonitoringId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("monitoring_id");
+
+                    b.Property<string>("Result")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("result");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AccountId", "MonitoringId");
+
+                    b.HasIndex("MonitoringId", "CheckedAt")
+                        .IsUnique()
+                        .HasDatabaseName("IX_monitoring_checks_monitoring_id_checked_at");
+
+                    b.ToTable("monitoring_checks", (string)null);
+                });
+
             modelBuilder.Entity("FleetProof.VehicleMonitoring.VehicleWatch", b =>
                 {
                     b.Property<Guid>("Id")
@@ -390,6 +426,16 @@ namespace FleetProof.Api.Migrations
                     b.HasOne("FleetProof.UserManagement.Account", null)
                         .WithMany()
                         .HasForeignKey("AccountId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("FleetProof.VehicleMonitoring.MonitoringCheck", b =>
+                {
+                    b.HasOne("FleetProof.VehicleMonitoring.VehicleWatch", null)
+                        .WithMany()
+                        .HasForeignKey("AccountId", "MonitoringId")
+                        .HasPrincipalKey("AccountId", "Id")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
